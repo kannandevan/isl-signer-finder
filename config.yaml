@@ -5,16 +5,20 @@ processing:
   db_path: "checkpoints.db"      # SQLite database for resumable execution
   log_level: "INFO"              # Logging level: DEBUG, INFO, WARNING, ERROR
   ffmpeg_timeout: 30             # Timeout for ffmpeg frame extraction in seconds
+  early_scan_timestamps: [5, 10, 15, 20, 30, 45, 60]
 
 # Detection Settings
 detection:
-  crop_left_ratio: 0.40          # We only analyze the left 40% of the screen
+  crop_left_ratio: 0.50          # We only analyze the left 50% of the screen
   confidence_threshold: 0.6      # Minimum confidence to consider a positive match
-  use_haarcascade: true          # Use fast Haar Cascades for layout/human detection
+  use_haarcascade: false         # Use fast Haar Cascades (deprecated in favor of MediaPipe)
+  use_mediapipe: true            # Use MediaPipe Pose and Hands
 
 # Output Settings
 output:
   csv_path: "output/results.csv"
   xlsx_path: "output/results.xlsx"
   save_frames: false             # If true, saves the positive detected frames for debugging
-  frames_dir: "output/frames"
+  frames_dir: "output/debug_frames"
+  save_crops: true               # Save crop regions
+  save_failed_frames: true       # Save frames when detection fails

@@ -1,73 +1,107 @@
 import cv2
-import os
 import logging
 import numpy as np
-from typing import Tuple
+from typing import Tuple, List, Optional
+import mediapipe as mp
 
 logger = logging.getLogger(__name__)
 
 class SignLanguageDetector:
-    def __init__(self, crop_left_ratio: float = 0.40, confidence_threshold: float = 0.6):
+    def __init__(self, crop_left_ratio: float = 0.50, confidence_threshold: float = 0.6):
         self.crop_left_ratio = crop_left_ratio
         self.confidence_threshold = confidence_threshold
         
-        # Initialize Haar cascade for face detection
-        cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-        self.face_cascade = cv2.CascadeClassifier(cascade_path)
+        # Initialize MediaPipe
+        self.mp_pose = mp.solutions.pose
+        self.mp_hands = mp.solutions.hands
         
-        # Initialize HOG descriptor for person detection (fallback)
-        self.hog = cv2.HOGDescriptor()
-        self.hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+        self.pose_detector = self.mp_pose.Pose(
+            static_image_mode=True, 
+            min_detection_confidence=0.5
+        )
+        self.hands_detector = self.mp_hands.Hands(
+            static_image_mode=True, 
+            max_num_hands=2, 
+            min_detection_confidence=0.3
+        )
 
-    def analyze_frame(self, frame: np.ndarray) -> Tuple[bool, float]:
+    def _crop_left(self, frame: np.ndarray) -> np.ndarray:
+        height, width = frame.shape[:2]
+        crop_width = int(width * self.crop_left_ratio)
+        return frame[:, :crop_width]
+
+    def analyze_frame_sequence(self, frames: List[np.ndarray]) -> Tuple[bool, float, Optional[np.ndarray]]:
         """
-        Analyzes a single frame for the presence of a sign language interpreter.
+        Analyzes a sequence of frames for the presence of a sign language interpreter.
         
         Args:
-            frame: A numpy array representing the BGR image from OpenCV.
+            frames: A list of numpy arrays representing BGR images.
             
         Returns:
-            A tuple of (detected: bool, confidence: float)
+            A tuple of (detected: bool, confidence: float, debug_frame: Optional[np.ndarray])
         """
-        if frame is None or frame.size == 0:
-            return False, 0.0
-            
-        height, width = frame.shape[:2]
+        if not frames:
+            return False, 0.0, None
+
+        pose_detections = 0
+        hand_detections = 0
         
-        # Crop to the left side where the interpreter box is usually located
-        crop_width = int(width * self.crop_left_ratio)
-        left_crop = frame[:, :crop_width]
-        
-        # Convert to grayscale for detection
-        gray = cv2.cvtColor(left_crop, cv2.COLOR_BGR2GRAY)
-        
-        # First, try to detect a face using Haar Cascade (fastest)
-        # We tune parameters to avoid false positives. 
-        # minNeighbors=5, scaleFactor=1.1
-        faces = self.face_cascade.detectMultiScale(
-            gray, 
-            scaleFactor=1.1, 
-            minNeighbors=5, 
-            minSize=(30, 30)
-        )
-        
-        if len(faces) > 0:
-            # We found a face on the left side. 
-            # In a news video, a prominent face on the left 40% in a box is very likely the interpreter.
-            # We assign a high confidence.
-            return True, 0.85
-            
-        # Fallback to HOG person detection if face is missed but a person is visible
-        boxes, weights = self.hog.detectMultiScale(left_crop, winStride=(8,8))
-        
-        if len(boxes) > 0:
-            # HOG returns weights for each detection
-            max_weight = float(np.max(weights)) if len(weights) > 0 else 0.0
-            
-            # Normalize confidence somewhat heuristically
-            confidence = min(max_weight / 2.0, 0.95)
-            
-            if confidence >= self.confidence_threshold:
-                return True, confidence
+        # We will use the first frame as the base debug frame
+        base_crop = self._crop_left(frames[0])
+        debug_frame = base_crop.copy()
+
+        hand_positions = []
+
+        for frame in frames:
+            if frame is None or frame.size == 0:
+                continue
                 
-        return False, 0.0
+            crop = self._crop_left(frame)
+            rgb_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+            
+            # Detect Pose
+            pose_results = self.pose_detector.process(rgb_crop)
+            if pose_results.pose_landmarks:
+                pose_detections += 1
+                
+            # Detect Hands
+            hands_results = self.hands_detector.process(rgb_crop)
+            if hands_results.multi_hand_landmarks:
+                hand_detections += 1
+                
+                # Track wrist positions to calculate movement variance later
+                for hand_landmarks in hands_results.multi_hand_landmarks:
+                    wrist = hand_landmarks.landmark[self.mp_hands.HandLandmark.WRIST]
+                    hand_positions.append((wrist.x, wrist.y))
+
+        num_frames = len(frames)
+        confidence = 0.0
+        
+        # Base confidence from pose consistency
+        if pose_detections > 0:
+            confidence += 0.4 * (pose_detections / num_frames)
+            
+        # Confidence from hand presence
+        if hand_detections > 0:
+            confidence += 0.3 * (hand_detections / num_frames)
+            
+        # Confidence from movement variance (if hands moved between frames)
+        if len(hand_positions) > 1:
+            xs = [p[0] for p in hand_positions]
+            ys = [p[1] for p in hand_positions]
+            var_x = np.var(xs)
+            var_y = np.var(ys)
+            
+            if var_x > 0.0001 or var_y > 0.0001:
+                confidence += 0.2  # Bonus for detected motion
+                
+        # Draw some debug info on the debug frame if it's reasonably confident
+        if confidence >= self.confidence_threshold:
+            cv2.putText(debug_frame, f"Conf: {confidence:.2f}", (10, 30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            
+        return confidence >= self.confidence_threshold, confidence, debug_frame
+
+    def close(self):
+        self.pose_detector.close()
+        self.hands_detector.close()

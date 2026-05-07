@@ -1,8 +1,8 @@
 import yaml
 import os
 import logging
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, List
 
 @dataclass
 class ProcessingConfig:
@@ -11,12 +11,14 @@ class ProcessingConfig:
     db_path: str
     log_level: str
     ffmpeg_timeout: int
+    early_scan_timestamps: List[int] = field(default_factory=lambda: [5, 10, 15, 20, 30, 45, 60])
 
 @dataclass
 class DetectionConfig:
-    crop_left_ratio: float
-    confidence_threshold: float
-    use_haarcascade: bool
+    crop_left_ratio: float = 0.50
+    confidence_threshold: float = 0.6
+    use_haarcascade: bool = False
+    use_mediapipe: bool = True
 
 @dataclass
 class OutputConfig:
@@ -24,6 +26,8 @@ class OutputConfig:
     xlsx_path: str
     save_frames: bool
     frames_dir: str
+    save_crops: bool = False
+    save_failed_frames: bool = False
 
 class Config:
     def __init__(self, config_path: str = "config.yaml"):

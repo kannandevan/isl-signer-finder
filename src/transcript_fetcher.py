@@ -15,8 +15,8 @@ def fetch_transcript(video_id: str) -> Tuple[Optional[str], Optional[str]]:
         # Get all available transcripts for the video
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
         
-        # Preferred languages: Hindi, then English
-        target_langs = ['hi', 'en']
+        # Preferred languages: hi, hi-IN, en
+        target_langs = ['hi', 'hi-IN', 'en']
         
         transcript_obj = None
         
@@ -37,9 +37,8 @@ def fetch_transcript(video_id: str) -> Tuple[Optional[str], Optional[str]]:
                 except:
                     continue
                     
-        # 3. If neither, just get whatever the first available transcript is
+        # 3. Multilingual fallback: If neither, just get whatever the first available transcript is
         if not transcript_obj:
-            # We iterate and pick the first one
             for transcript in transcript_list:
                 transcript_obj = transcript
                 break

@@ -6,7 +6,7 @@ from typing import Set
 
 from .config import Config, get_config
 from .models import VideoResult, VideoInfo
-from .video_utils import get_video_info, generate_timestamps
+from .video_utils import get_video_info, generate_timestamps, generate_early_timestamps
 from .frame_extractor import FrameExtractor
 from .detector import SignLanguageDetector
 from .transcript_fetcher import fetch_transcript
@@ -32,52 +32,86 @@ def process_video(video_url: str, config_path: str = "config.yaml") -> VideoResu
     
     result = VideoResult(video_url=video_url, detected="no", status="pending")
     
-    # 1. Check if already processed
     if state_manager.is_processed(video_url):
         logger.info(f"Skipping {video_url}, already processed.")
-        result.status = "completed" # Already completed previously
+        result.status = "completed"
         return result
         
     try:
-        # 2. Get video info
         logger.info(f"Fetching info for {video_url}")
         info = get_video_info(video_url)
         
-        # 3. Progressive checking loop
-        # Start at 5 splits, up to max_splits (usually 10)
         found_interpreter = False
         
-        for num_splits in range(5, config.processing.max_splits + 1):
+        # --- PHASE 1: EARLY DENSE SCAN ---
+        logger.info(f"[{video_url}] Phase 1: Early Dense Scan")
+        early_timestamps = generate_early_timestamps(
+            config.processing.early_scan_timestamps, 
+            info.duration, 
+            checked_timestamps
+        )
+        
+        for ts in early_timestamps:
             if found_interpreter:
                 break
                 
-            new_timestamps = generate_timestamps(info.duration, num_splits, checked_timestamps)
+            logger.debug(f"[{video_url}] Extracting frame sequence at {ts:.2f}s")
+            frames = extractor.extract_frame_sequence(info.direct_url, ts)
+            checked_timestamps.add(ts)
+            frames_checked += len(frames)
             
-            for ts in new_timestamps:
-                logger.debug(f"[{video_url}] Extracting frame at {ts:.2f}s (split level {num_splits})")
-                frame = extractor.extract_frame(info.direct_url, ts)
-                checked_timestamps.add(ts)
-                frames_checked += 1
+            if frames:
+                detected, confidence, debug_frame = detector.analyze_frame_sequence(frames)
                 
-                if frame is not None:
-                    # 4. Analyze Frame
-                    detected, confidence = detector.analyze_frame(frame)
+                if detected:
+                    logger.info(f"[{video_url}] Interpreter detected at {ts:.2f}s (Conf: {confidence:.2f})")
+                    found_interpreter = True
+                    result.detected = "yes"
+                    result.detection_timestamp = ts
+                    result.detection_confidence = confidence
                     
-                    if detected:
-                        logger.info(f"[{video_url}] Interpreter detected at {ts:.2f}s with confidence {confidence:.2f}")
-                        found_interpreter = True
-                        result.detected = "yes"
-                        result.detection_timestamp = ts
-                        result.detection_confidence = confidence
+                    if config.output.save_frames and debug_frame is not None:
+                        frame_path = os.path.join(config.output.frames_dir, f"{info.video_id}_{ts:.2f}_pos.jpg")
+                        cv2.imwrite(frame_path, debug_frame)
+                elif config.output.save_failed_frames and debug_frame is not None:
+                    # Save a sample of the false negative check for debugging
+                    frame_path = os.path.join(config.output.frames_dir, f"{info.video_id}_{ts:.2f}_neg.jpg")
+                    cv2.imwrite(frame_path, debug_frame)
+
+        # --- PHASE 2: ADAPTIVE INTERVAL SCANNING ---
+        if not found_interpreter:
+            logger.info(f"[{video_url}] Phase 2: Adaptive Interval Scan")
+            for num_splits in range(5, config.processing.max_splits + 1):
+                if found_interpreter:
+                    break
+                    
+                new_timestamps = generate_timestamps(info.duration, num_splits, checked_timestamps)
+                
+                for ts in new_timestamps:
+                    logger.debug(f"[{video_url}] Extracting frame sequence at {ts:.2f}s (split level {num_splits})")
+                    frames = extractor.extract_frame_sequence(info.direct_url, ts)
+                    checked_timestamps.add(ts)
+                    frames_checked += len(frames)
+                    
+                    if frames:
+                        detected, confidence, debug_frame = detector.analyze_frame_sequence(frames)
                         
-                        # Optionally save frame
-                        if config.output.save_frames:
-                            frame_path = os.path.join(config.output.frames_dir, f"{info.video_id}_{ts:.2f}.jpg")
-                            cv2.imwrite(frame_path, frame)
+                        if detected:
+                            logger.info(f"[{video_url}] Interpreter detected at {ts:.2f}s (Conf: {confidence:.2f})")
+                            found_interpreter = True
+                            result.detected = "yes"
+                            result.detection_timestamp = ts
+                            result.detection_confidence = confidence
                             
-                        break # Stop checking timestamps
-                        
-        # 5. Fetch Transcript if detected
+                            if config.output.save_frames and debug_frame is not None:
+                                frame_path = os.path.join(config.output.frames_dir, f"{info.video_id}_{ts:.2f}_pos.jpg")
+                                cv2.imwrite(frame_path, debug_frame)
+                            break
+                        elif config.output.save_failed_frames and debug_frame is not None:
+                            frame_path = os.path.join(config.output.frames_dir, f"{info.video_id}_{ts:.2f}_neg.jpg")
+                            cv2.imwrite(frame_path, debug_frame)
+
+        # --- TRANSCRIPT FETCHING ---
         if found_interpreter:
             logger.info(f"[{video_url}] Fetching transcript...")
             transcript_text, lang = fetch_transcript(info.video_id)
@@ -85,7 +119,7 @@ def process_video(video_url: str, config_path: str = "config.yaml") -> VideoResu
                 result.transcript = transcript_text
                 result.transcript_language = lang
             else:
-                result.transcript = "no" # Could not fetch
+                result.transcript = "no" 
         else:
             result.transcript = "no"
             
@@ -101,8 +135,9 @@ def process_video(video_url: str, config_path: str = "config.yaml") -> VideoResu
         result.processing_time = time.time() - start_time
         result.frames_checked = frames_checked
         
-        # Save to state manager
         if result.status != "pending":
             state_manager.save_result(result)
+            
+        detector.close()
             
     return result

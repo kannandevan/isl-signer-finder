@@ -1,133 +1,111 @@
 # YouTube Sign Language Interpreter Detector
 
 ## 1. Project Overview
-This project is a production-grade, high-performance Python system that analyzes large numbers of YouTube news videos to detect if a sign language interpreter is present. Designed for massive scale (100,000+ videos), it uses a lightweight OpenCV-based layout heuristic rather than full video downloads or heavy AI models, prioritizing speed, low bandwidth, and low memory usage.
+This project is a production-grade, high-performance Python system that analyzes large volumes of YouTube news videos (100,000+) to detect if a sign language interpreter is present. It is designed to strictly minimize bandwidth and RAM usage while preventing false negatives common in older heuristics.
 
-## 2. Architecture Diagram
+## 2. Architecture Explanation
+The architecture relies on a Master-Worker pool. The Master process parses YouTube URLs and distributes them. Workers use `yt-dlp` to get direct stream links, preventing full video downloads. They invoke `ffmpeg` to extract temporal bursts of frames into memory, and `MediaPipe` calculates pose/hand activity. Results are cached into a local SQLite database (`checkpoints.db`) for immediate resumability, and finally dumped to CSV/XLSX.
 
-```mermaid
-flowchart TD
-    A[Input URLs] --> B[Master Process CLI]
-    B --> C{Multiprocessing Pool}
-    
-    subgraph Workers
-        C --> D[Worker 1]
-        C --> E[Worker 2]
-        C --> F[Worker N]
-        
-        D -->|yt-dlp| G[Fetch Video Duration & Direct Stream URL]
-        G --> H[Adaptive Timestamp Generation]
-        
-        H -->|ffmpeg| I[Extract 1 Frame to Memory]
-        I -->|OpenCV| J[Analyze Layout & Human Presence]
-        J -->|Detected?| K{Result}
-        K -- No --> H
-        K -- Yes --> L[Fetch YouTube Transcript]
-    end
-    
-    L --> M[(SQLite Checkpoint DB)]
-    M --> N[Export to CSV / XLSX]
+## 3. Detection Pipeline Explanation
+1. **Phase 1 (Early Dense Scan):** Most news interpreters appear instantly. We densely scan `[5s, 10s, 15s, 20s, 30s, 45s, 60s]`.
+2. **Phase 2 (Adaptive Interval Scan):** If Phase 1 fails, we split the video duration into 5 intervals, then 6, 7, etc.
+3. **Temporal Burst:** At every timestamp `t`, we extract `t, t+0.5, t+1.0`.
+4. **CV Analysis:** We crop the left 50% of the frames and run MediaPipe Pose and Hands to detect continuous upper-body motion and hand landmarks.
+
+## 4. Dataset Example Explanation
+Analysis of the `dataset_examples/` folders revealed that older implementations failed because they expected tiny corner boxes. The positive examples show real-world Indian TV broadcasts where the signer often occupies massive split-screen layouts.
+
+## 5. Signer Layout Explanation
+In the target dataset (Indian news), signers:
+- Usually appear in a **LARGE LEFT SPLIT SCREEN** layout.
+- Can occupy up to 40–50% of the screen width.
+- Exhibit continuous, varying hand movement from the beginning of the broadcast.
+Our system dynamically adapts to this by analyzing the entire left 50% using MediaPipe rather than hardcoding strict, tiny bounding boxes.
+
+## 6. Installation Guide
+```bash
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-## 3. Installation Guide
+## 7. FFmpeg Setup
+FFmpeg must be installed and accessible in your system's PATH.
+- **Windows:** `winget install ffmpeg`
+- **Linux:** `sudo apt install ffmpeg`
 
-### Prerequisites
-- **Python:** 3.9+
-- **ffmpeg:** Must be installed on your system and accessible via the PATH. 
-  - *Windows:* `winget install ffmpeg`
-  - *Ubuntu:* `sudo apt install ffmpeg`
-
-### Setup
-1. Clone this repository.
-2. Create a virtual environment:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows use `venv\Scripts\activate`
-   ```
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-## 4. Quick Start
-To run a test with the included sample:
+## 8. Quick Start Guide
+Run the orchestrator with the provided sample file:
 ```bash
 python main.py -i sample_urls.txt
 ```
-This will read the URLs, process them in parallel, and output results into `output/results.csv` and `output/results.xlsx`.
 
-## 5. Configuration
-Modify `config.yaml` to tweak system behavior:
-- `processing.num_workers`: Number of parallel video processing workers.
-- `processing.max_splits`: Number of intervals to check before giving up.
-- `detection.crop_left_ratio`: The portion of the screen (from the left) to analyze (default 0.40).
-- `detection.confidence_threshold`: OpenCV confidence threshold to consider a positive match.
+## 9. Example Commands
+- Basic run: `python main.py -i urls.txt`
+- Custom config: `python main.py -i urls.txt -c custom_config.yaml`
 
-## 6. Input Format
-Create a plain text file (`.txt`) with one YouTube URL per line. Lines starting with `#` are ignored. Example:
-```text
-https://www.youtube.com/watch?v=video1
-https://www.youtube.com/watch?v=video2
+## 10. Configuration Options
+Edit `config.yaml`:
+- `processing.num_workers`: Multiprocessing concurrency limit.
+- `processing.early_scan_timestamps`: Initial dense scan seconds.
+- `detection.crop_left_ratio`: Width ratio to crop (default `0.50`).
+- `output.save_failed_frames`: Exports negative frames for debugging.
+
+## 11. Worker Scaling
+The system scales horizontally by increasing `num_workers`. Since frame extraction is piped directly into memory and OpenCV/MediaPipe run on CPU, CPU core count is your primary bottleneck. Recommend `num_workers = CPU_CORES - 1`.
+
+## 12. Debugging Guide
+If a video fails or returns a false negative, enable `save_crops: true` and `save_failed_frames: true` in `config.yaml`. The system will save the annotated MediaPipe frames to `output/debug_frames/` with `_neg.jpg` suffix.
+
+## 13. Transcript Handling
+If an interpreter is found, we fetch the transcript prioritizing:
+1. `hi` (Hindi)
+2. `hi-IN`
+3. `en` (English)
+4. Auto-generated captions
+5. Any available fallback.
+
+## 14. Troubleshooting
+- **No frames extracted:** Ensure `ffmpeg` is globally installed.
+- **Transcript errors:** Some YouTube videos disable captions entirely. The system catches this and sets transcript to `no`.
+- **Memory leaks:** The system correctly closes MediaPipe instances per-video to prevent RAM accumulation.
+
+## 15. Performance Optimization
+- **Bandwidth:** `yt-dlp` finds `.m3u8`/`.mp4` stream chunks. `ffmpeg` fast-seeks (`-ss` before `-i`) to only download the few megabytes needed for 1 second of video.
+- **Memory:** Disk I/O is bypassed using `image2pipe`.
+
+## 16. Deployment Guide
+For large runs (100k+), deploy on an AWS c5/c6i instance or equivalent CPU-optimized server. Run the command inside a `tmux` or `screen` session.
+
+## 17. Docker Setup
+```dockerfile
+FROM python:3.10-slim
+RUN apt-get update && apt-get install -y ffmpeg libgl1-mesa-glx
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY . .
+CMD ["python", "main.py", "-i", "sample_urls.txt"]
 ```
 
-## 7. Output Format
-Exported as `results.csv` and `results.xlsx` containing:
-- `video_url`: The original URL
-- `detected`: "yes", "no", or "error"
-- `transcript`: The cleaned transcript text (or "no")
-- `detection_timestamp`: Timestamp in seconds where interpreter was found
-- `frames_checked`: Total number of frames extracted
-- `processing_time`: Total processing time for the video
-- `transcript_language`: Language code (e.g., 'hi', 'en')
-- `detection_confidence`: OpenCV confidence score
-- `status`: "completed" or "failed"
-- `error_message`: Stack trace or error string if failed
+## 18. Resume / Recovery System
+A local `checkpoints.db` is updated atomically. If the script crashes, simply restart it. Completed URLs will be skipped automatically in `O(1)` time.
 
-## 8. Performance Optimization
-- **CPU vs GPU:** Currently optimized for CPU execution using lightweight Haar Cascades and HOG. This allows massive concurrency across many CPU cores without memory bottlenecking.
-- **Network:** Uses `yt-dlp` to get direct `.m3u8` streams and extracts frames via `ffmpeg` fast-seek (`-ss` before `-i`). Full videos are never downloaded.
-- **Memory:** `ffmpeg` pipes image bytes directly to OpenCV in-memory, avoiding disk I/O.
+## 19. Sample Inputs
+`sample_urls.txt`:
+```
+https://www.youtube.com/watch?v=dQw4w9WgXcQ
+https://www.youtube.com/watch?v=3JZ_D3ELwOQ
+```
 
-## 9. Resume & Recovery
-- The system automatically creates a local SQLite database (`checkpoints.db`).
-- If execution is interrupted (e.g., power failure), simply re-run the same command. The system will skip videos already marked as "completed".
+## 20. Sample Outputs
+Exported `output/results.csv`:
+`video_url, detected, transcript, detection_timestamp, frames_checked, processing_time, transcript_language, detection_confidence, status, error_message`
 
-## 10. Logging System
-- Console output shows real-time progress.
-- Detailed logs are written to `processing.log`.
+## 21. Example Screenshots
+*(Imagine seeing split-screen Indian news with a MediaPipe skeleton overlay on the left 50% bounding box).*
 
-## 11. Troubleshooting
-- **ffmpeg issues:** Ensure `ffmpeg` is available in your PATH. Try running `ffmpeg -version` in your terminal.
-- **Transcript failures:** If a transcript cannot be fetched, the `transcript` column will be "no". Some videos disable transcripts or API limits may apply.
-- **Corrupted videos:** Handled gracefully. Video status will be marked as `failed` and logged in the DB, allowing the pipeline to continue.
-
-## 12. Development Guide
-- `src/video_utils.py`: Contains logic for adaptive timestamp generation.
-- `src/detector.py`: Customize the OpenCV logic here (e.g., adding YOLO or MediaPipe).
-- `src/frame_extractor.py`: Wrapper around ffmpeg for fast seeking.
-
-## 13. Production Deployment
-- For Linux deployment, consider using a `systemd` service or a `tmux` session for long-running executions.
-- Can be containerized easily:
-  ```dockerfile
-  FROM python:3.10-slim
-  RUN apt-get update && apt-get install -y ffmpeg
-  WORKDIR /app
-  COPY requirements.txt .
-  RUN pip install -r requirements.txt
-  COPY . .
-  CMD ["python", "main.py", "-i", "urls.txt"]
-  ```
-
-## 14. Example Workflow
-1. Prepare a file `news_videos.txt` with 10,000 URLs.
-2. Edit `config.yaml` to set `num_workers: 16`.
-3. Run `python main.py -i news_videos.txt`.
-4. Monitor the console output.
-5. Once finished, find the results in `output/results.xlsx`.
-
-## 15. Future Improvements
-- **Advanced AI Verification:** Add MediaPipe Pose/Hands detection as a fallback when OpenCV confidence is medium (0.4 to 0.7).
-- **GPU CV Acceleration:** Incorporate YOLOv8 for precise bounding box detection if deployed on GPU-rich servers.
-- **Distributed Queues:** Replace SQLite with Redis/Celery for multi-server processing.
-- **Web Monitoring Panel:** Implement a Flask/FastAPI dashboard to monitor progress in real-time.
+## 22. False Negative Debugging Guide
+1. Check `output/debug_frames/`.
+2. If the person is visible but undetected, the `confidence_threshold` (0.6) might be too high for low-res videos.
+3. If the person is cut off, adjust `crop_left_ratio` to `0.60`.

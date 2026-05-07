@@ -2,7 +2,8 @@ import subprocess
 import logging
 import cv2
 import numpy as np
-from typing import Optional
+from typing import Optional, List
+import concurrent.futures
 
 logger = logging.getLogger(__name__)
 
@@ -56,3 +57,18 @@ class FrameExtractor:
         except Exception as e:
             logger.error(f"Failed to extract frame at {timestamp}: {str(e)}")
             return None
+
+    def extract_frame_sequence(self, video_url: str, base_timestamp: float) -> List[np.ndarray]:
+        """
+        Extracts a sequence of frames at [t, t+0.5, t+1.0] to capture motion.
+        """
+        timestamps = [base_timestamp, base_timestamp + 0.5, base_timestamp + 1.0]
+        frames = []
+        
+        # We can extract them sequentially or in parallel. Sequential is safer for bandwidth.
+        for ts in timestamps:
+            frame = self.extract_frame(video_url, ts)
+            if frame is not None:
+                frames.append(frame)
+                
+        return frames

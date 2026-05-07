@@ -41,6 +41,26 @@ def get_video_info(url: str) -> VideoInfo:
         logger.error(f"Error fetching info for {url}: {str(e)}")
         raise
 
+def generate_early_timestamps(early_scan_timestamps: List[int], duration: float, checked_timestamps: Set[float], tolerance: float = 2.0) -> List[float]:
+    """
+    Generates new timestamps for the early dense scan phase.
+    """
+    new_timestamps = []
+    for ts in early_scan_timestamps:
+        if ts >= duration:
+            break
+            
+        is_duplicate = False
+        for checked_ts in checked_timestamps:
+            if abs(ts - checked_ts) <= tolerance:
+                is_duplicate = True
+                break
+                
+        if not is_duplicate:
+            new_timestamps.append(float(ts))
+            
+    return new_timestamps
+
 def generate_timestamps(duration: float, num_splits: int, checked_timestamps: Set[float], tolerance: float = 2.0) -> List[float]:
     """
     Generates new timestamps for a video given a split count.
